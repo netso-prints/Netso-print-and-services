@@ -38,6 +38,7 @@ interface AdminService {
   turnaround: string;
   available: boolean;
   options: ServiceOption[];
+  outsideAreaChargeApplies: boolean;
   signageType?: 'panaprint-panaflex' | 'acrylic' | 'cut-out';
   signageConfig?: Record<string, unknown>;
 }
@@ -65,6 +66,7 @@ interface ServiceForm {
   options: OptionForm[];
   signageType?: 'panaprint-panaflex' | 'acrylic' | 'cut-out';
   signageConfig: Record<string, unknown>;
+  outsideAreaChargeApplies: boolean;
   legacySignage?: boolean;
 }
 
@@ -157,6 +159,7 @@ export function ServiceManagement({
       description: '',
       options: [blankOption()],
       signageConfig: {},
+      outsideAreaChargeApplies: false,
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -175,6 +178,7 @@ export function ServiceManagement({
       signageType: service.signageType ?? undefined,
       legacySignage: service.category === 'Signage' && !service.signageType,
       signageConfig: service.signageConfig ?? {},
+      outsideAreaChargeApplies: service.outsideAreaChargeApplies,
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -271,6 +275,7 @@ export function ServiceManagement({
           popularFor: form.popularFor.trim() || undefined,
           description: form.description,
           options,
+          outsideAreaChargeApplies: form.outsideAreaChargeApplies,
           signageType: form.category === 'Signage' ? form.signageType : undefined,
           signageConfig: form.category === 'Signage' ? form.signageConfig : undefined,
         }),
@@ -449,6 +454,20 @@ export function ServiceManagement({
               onChange={(e) => setForm({ ...form, description: e.target.value })}
               className={`sm:col-span-2 ${INPUT}`}
             />
+            <label className="sm:col-span-2 flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-bold text-zinc-900">
+              <input
+                type="checkbox"
+                checked={form.outsideAreaChargeApplies}
+                onChange={(e) => setForm({ ...form, outsideAreaChargeApplies: e.target.checked })}
+                className="mt-1 size-4 accent-[#B8860B]"
+              />
+              <span>
+                Add the outside-area delivery charge to this service
+                <span className="mt-1 block text-xs font-normal text-zinc-600">
+                  Turn this on for services that require delivery or implementation outside Santiago City and the approved in-area locations.
+                </span>
+              </span>
+            </label>
           </div>
 
           {form.category === 'Signage' && form.signageType && (

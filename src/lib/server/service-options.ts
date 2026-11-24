@@ -424,6 +424,9 @@ async function setup(): Promise<void> {
   if (seeded.length) return;
   await seedCatalog();
   await mysqlPool.execute(
+    "UPDATE tbl_services SET outside_area_charge_applies = TRUE WHERE service_code = 'tarpaulin'",
+  );
+  await mysqlPool.execute(
     `INSERT INTO tbl_app_setting (setting_key, setting_value) VALUES (?, 'done')
      ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
     [SEED_KEY],

@@ -5,7 +5,7 @@ type Db = Parameters<typeof queryRows>[0];
 
 // Eligibility rules for the Service Order Agreement PDF.
 // The statuses and threshold are proposed defaults that await client approval
-// (Week 16, CH07 client confirmation). An order exactly at the threshold qualifies.
+// An order exactly at the threshold qualifies.
 export const AGREEMENT_ELIGIBLE_STATUSES = [
   'In Pre-Press',
   'In Production',

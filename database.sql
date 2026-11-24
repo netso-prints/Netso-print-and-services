@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS tbl_services (
     popular_for     VARCHAR(100)     NULL,
     turnaround      VARCHAR(40)      NOT NULL,
     is_active       BOOLEAN          NOT NULL DEFAULT TRUE,
+    outside_area_charge_applies BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      DATETIME(3)      NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at      DATETIME(3)      NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
                                     ON UPDATE CURRENT_TIMESTAMP(3),

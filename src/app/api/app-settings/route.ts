@@ -106,7 +106,7 @@ export async function PATCH(request: NextRequest) {
 
     await recordAuditEvent(request, user, {
       category: 'Account / System',
-      action: 'Updated Week 16 system settings',
+      action: 'Updated system settings',
       details: `Updated: ${updates.map(([key]) => key.replace(/_/g, ' ')).join(', ')}.`,
     });
     return NextResponse.json({ ok: true, ...(await loadWeek16Settings(connection)) });
