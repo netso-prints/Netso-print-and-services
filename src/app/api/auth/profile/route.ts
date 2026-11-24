@@ -20,6 +20,21 @@ const schema = z.object({
   username: z.string().trim().min(3).max(50).regex(/^[A-Za-z0-9._-]+$/),
   currentPassword: z.string().max(128).optional(),
   newPassword: z.string().min(12).max(128).optional(),
+  address: z.object({
+    region: z.string().trim().min(1).max(100),
+    regionCode: z.string().trim().min(1).max(20).optional(),
+    province: z.string().trim().max(100).optional(),
+    provinceCode: z.string().trim().max(20).optional(),
+    cityMunicipality: z.string().trim().min(1).max(100),
+    cityMunicipalityCode: z.string().trim().min(1).max(20).optional(),
+    barangay: z.string().trim().min(1).max(100),
+    barangayCode: z.string().trim().min(1).max(20).optional(),
+    street: z.string().trim().min(1).max(150),
+    houseUnit: z.string().trim().min(1).max(150),
+    subdivision: z.string().trim().max(150).optional(),
+    postalCode: z.string().trim().regex(/^\d{4}$/),
+    landmark: z.string().trim().max(150).optional(),
+  }).optional(),
 }).superRefine((value, context) => {
   if (value.currentPassword && !value.newPassword) {
     context.addIssue({
@@ -29,6 +44,57 @@ const schema = z.object({
     });
   }
 });
+
+export async function GET(request: NextRequest) {
+  try {
+    const user = await requireSession(request, ['customer']);
+    const rows = await queryRows<
+      {
+        region: string | null;
+        region_code: string | null;
+        province: string | null;
+        province_code: string | null;
+        city_municipality: string | null;
+        city_municipality_code: string | null;
+        barangay: string | null;
+        barangay_code: string | null;
+        street: string | null;
+        house_unit: string | null;
+        subdivision: string | null;
+        postal_code: string | null;
+        landmark: string | null;
+      } & import('mysql2/promise').RowDataPacket
+    >(
+      mysqlPool,
+      `SELECT region, region_code, province, province_code, city_municipality,
+              city_municipality_code, barangay, barangay_code, street, house_unit,
+              subdivision, postal_code, landmark
+       FROM tbl_user_address WHERE user_id = ? AND is_primary = 1 LIMIT 1`,
+      [user.id],
+    );
+    const address = rows[0];
+    return NextResponse.json({
+      ok: true,
+      address: address ? {
+        region: address.region ?? '',
+        regionCode: address.region_code ?? '',
+        province: address.province ?? '',
+        provinceCode: address.province_code ?? '',
+        cityMunicipality: address.city_municipality ?? '',
+        cityMunicipalityCode: address.city_municipality_code ?? '',
+        barangay: address.barangay ?? '',
+        barangayCode: address.barangay_code ?? '',
+        street: address.street ?? '',
+        houseUnit: address.house_unit ?? '',
+        subdivision: address.subdivision ?? '',
+        postalCode: address.postal_code ?? '',
+        landmark: address.landmark ?? '',
+      } : null,
+    });
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
+}
 
 export async function PATCH(request: NextRequest) {
   try {
@@ -43,7 +109,7 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const { username, currentPassword, newPassword } = parsed.data;
+    const { username, currentPassword, newPassword, address } = parsed.data;
     const rows = await queryRows<
       {
         username: string | null;
@@ -82,6 +148,56 @@ export async function PATCH(request: NextRequest) {
       'UPDATE tbl_user SET username = ?, password_hash = COALESCE(?, password_hash) WHERE UID = ?',
       [username, passwordHash, user.id],
     );
+    if (address) {
+      const isNcr = /national capital region|ncr/i.test(address.region);
+      const isIndependentCity = /santiago/i.test(address.cityMunicipality);
+      if (!isNcr && !isIndependentCity && !address.province) {
+        throw new ApiError(400, 'Province is required for provincial cities and municipalities.');
+      }
+      const existingAddress = await queryRows<{ ID: number } & import('mysql2/promise').RowDataPacket>(
+        mysqlPool,
+        'SELECT ID FROM tbl_user_address WHERE user_id = ? AND is_primary = 1 LIMIT 1',
+        [user.id],
+      );
+      const addressValues = [
+        address.region,
+        address.regionCode ?? null,
+        address.province || null,
+        address.provinceCode ?? null,
+        address.cityMunicipality,
+        address.cityMunicipalityCode ?? null,
+        address.cityMunicipality,
+        address.barangay,
+        address.barangayCode ?? null,
+        address.street,
+        address.houseUnit,
+        address.subdivision || null,
+        address.postalCode,
+        address.postalCode,
+        address.landmark || null,
+      ];
+      if (existingAddress.length) {
+        await mysqlPool.execute(
+          `UPDATE tbl_user_address SET
+             region = ?, region_code = ?, province = ?, province_code = ?,
+             city_municipality = ?, city_municipality_code = ?, municipality = ?,
+             barangay = ?, barangay_code = ?, street = ?, house_unit = ?,
+             subdivision = ?, zip_code = ?, postal_code = ?, landmark = ?, is_primary = 1
+           WHERE ID = ?`,
+          [...addressValues, existingAddress[0].ID],
+        );
+      } else {
+        await mysqlPool.execute(
+          `INSERT INTO tbl_user_address
+             (user_id, address_label, region, region_code, province, province_code,
+              city_municipality, city_municipality_code, municipality,
+              barangay, barangay_code, street, house_unit, subdivision, zip_code,
+              postal_code, landmark, is_primary)
+           VALUES (?, 'Primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          [user.id, ...addressValues],
+        );
+      }
+    }
 
     const name =
       [account.first_name, account.middle_name, account.last_name].filter(Boolean).join(' ') ||

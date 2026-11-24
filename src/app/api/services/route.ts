@@ -35,6 +35,11 @@ const optionSchema = z.object({
   available: z.boolean().optional(),
 });
 
+const signageSchema = z.object({
+  signageType: z.enum(['panaprint-panaflex', 'acrylic', 'cut-out']).optional(),
+  signageConfig: z.record(z.string(), z.unknown()).optional(),
+});
+
 const serviceFields = {
   name: z.string().trim().min(2).max(150),
   category: z.string().trim().min(1).max(60),
@@ -43,6 +48,7 @@ const serviceFields = {
   turnaround: z.string().trim().min(1).max(40),
   iconName: z.string().trim().max(50).optional(),
   options: z.array(optionSchema).min(1).max(40),
+  ...signageSchema.shape,
 };
 
 function toServiceOptions(options: z.infer<typeof optionSchema>[]): ServiceOption[] {
@@ -62,11 +68,12 @@ export async function GET() {
   try {
     await ensureServiceCatalog();
     const rows = await queryRows<
-      { ID: number; service_code: string; service_name: string; category_name: string; icon_name: string | null; base_price: string | number; price_unit: string; description: string; popular_for: string | null; turnaround: string; is_active: number } & RowDataPacket
+      { ID: number; service_code: string; service_name: string; category_name: string; icon_name: string | null; base_price: string | number; price_unit: string; description: string; popular_for: string | null; turnaround: string; is_active: number; signage_type: string | null; signage_config_json: string | null } & RowDataPacket
     >(
       mysqlPool,
       `SELECT s.ID, s.service_code, s.service_name, c.category_name, s.icon_name,
-              s.base_price, s.price_unit, s.description, s.popular_for, s.turnaround, s.is_active
+              s.base_price, s.price_unit, s.description, s.popular_for, s.turnaround, s.is_active,
+              s.signage_type, s.signage_config_json
        FROM tbl_services s JOIN tbl_service_category c ON c.ID = s.category_id
        ORDER BY s.is_active DESC, s.ID`,
     );
@@ -88,6 +95,12 @@ export async function GET() {
           turnaround: row.turnaround,
           available: Boolean(row.is_active),
           options,
+          signageType: row.signage_type,
+          signageConfig: row.signage_config_json
+            ? (() => {
+                try { return JSON.parse(row.signage_config_json); } catch { return {}; }
+              })()
+            : {},
         };
       }),
     });
@@ -129,8 +142,8 @@ export async function POST(request: NextRequest) {
     const [result] = await connection.execute(
       `INSERT INTO tbl_services
          (service_code, category_id, service_name, description, icon_name,
-          base_price, price_unit, popular_for, turnaround)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          base_price, price_unit, popular_for, turnaround, signage_type, signage_config_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         code,
         categories[0].ID,
@@ -141,6 +154,10 @@ export async function POST(request: NextRequest) {
         start.unit,
         data.popularFor || null,
         data.turnaround,
+        data.category === 'Signage' ? data.signageType ?? null : null,
+        data.category === 'Signage' && data.signageConfig
+          ? JSON.stringify(data.signageConfig)
+          : null,
       ],
     );
     const insertId = (result as { insertId: number }).insertId;
@@ -197,7 +214,8 @@ export async function PUT(request: NextRequest) {
     await connection.execute(
       `UPDATE tbl_services
        SET category_id = ?, service_name = ?, description = ?, icon_name = COALESCE(?, icon_name),
-           base_price = ?, price_unit = ?, popular_for = ?, turnaround = ?
+           base_price = ?, price_unit = ?, popular_for = ?, turnaround = ?,
+           signage_type = ?, signage_config_json = ?
        WHERE service_code = ?`,
       [
         categories[0].ID,
@@ -208,6 +226,10 @@ export async function PUT(request: NextRequest) {
         start.unit,
         data.popularFor || null,
         data.turnaround,
+        data.category === 'Signage' ? data.signageType ?? null : null,
+        data.category === 'Signage' && data.signageConfig
+          ? JSON.stringify(data.signageConfig)
+          : null,
         data.id,
       ],
     );

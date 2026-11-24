@@ -200,6 +200,14 @@ export function AdminRequestDetailsModal({
                 : 'Awaiting Payment'
               : order.status}
           </span>
+          <button
+            type="button"
+            onClick={() => window.open(`/api/orders/${encodeURIComponent(order.id)}/agreement`, '_blank', 'noopener,noreferrer')}
+            className="px-3 py-1.5 rounded-lg border border-[#D4A017] bg-white text-[#8A6500] text-xs font-extrabold flex items-center gap-1.5"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Agreement PDF
+          </button>
         </div>
 
         {/* 1. Customer Information */}
