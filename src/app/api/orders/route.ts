@@ -33,6 +33,16 @@ const orderSchema = z.object({
   customerEmail: z.email().max(254).optional(),
   amount: z.number().positive().max(100_000_000).optional(),
   paidAmount: z.number().min(0).max(100_000_000).optional(),
+  jobSiteAddress: z.object({
+    region: z.string().trim().min(1).max(100),
+    province: z.string().trim().max(100).optional(),
+    cityMunicipality: z.string().trim().min(1).max(100),
+    barangay: z.string().trim().min(1).max(100),
+    street: z.string().trim().min(1).max(150),
+    houseUnit: z.string().trim().min(1).max(150),
+    subdivision: z.string().trim().max(150).optional(),
+    postalCode: z.string().trim().regex(/^\d{4}$/),
+  }).optional(),
 });
 
 const statusSchema = z.enum([
@@ -65,6 +75,9 @@ type OrderRow = {
   quantity: number;
   color_mode: string | null;
   finish: string | null;
+  service_location_address: string | null;
+  service_location_classification: string | null;
+  location_charge: string | number;
 };
 
 function toClientOrder(row: OrderRow, files: Array<{ ID: number; original_file_name: string; file_size_bytes: string | number | null; file_extension: string | null }>) {
@@ -99,6 +112,9 @@ function toClientOrder(row: OrderRow, files: Array<{ ID: number; original_file_n
     notes: row.notes ?? '',
     paymentMethod: row.payment_method ?? undefined,
     paymentVerified: paidAmount > 0,
+    serviceLocation: row.service_location_address ?? '',
+    locationClassification: row.service_location_classification ?? '',
+    locationCharge: Number(row.location_charge),
     files: files.map((file) => ({
       id: String(file.ID),
       name: file.original_file_name,
@@ -237,7 +253,8 @@ async function loadClientOrders(user: SessionUser) {
     `SELECT o.ID, o.order_number, o.user_id, o.customer_name, o.customer_email, o.customer_phone,
             o.service_name_snapshot, c.category_name, o.total_amount,
             COALESCE(p.paid_amount, 0) AS paid_amount, o.status, o.progress_stage, o.notes,
-            o.created_at, o.payment_method, o.paper_size, o.page_count, o.quantity, o.color_mode, o.finish
+            o.created_at, o.payment_method, o.paper_size, o.page_count, o.quantity, o.color_mode, o.finish,
+            o.service_location_address, o.service_location_classification, o.location_charge
      FROM tbl_print_order o
      JOIN tbl_services s ON s.ID = o.service_id
      JOIN tbl_service_category c ON c.ID = s.category_id
@@ -303,6 +320,54 @@ export async function POST(request: NextRequest) {
         >(connection, 'SELECT first_name, middle_name, last_name, email, mobile_number FROM tbl_user WHERE UID = ? AND account_status = ? LIMIT 1', [user.id, 'active']);
     const account = users[0];
     if (!input.walkIn && !account) throw new ApiError(401, 'Your account is no longer active.');
+    let serviceLocationAddress: string | null = null;
+    let locationPsgcCode: string | null = null;
+    let locationClassification: 'in_area' | 'outside_area' | null = null;
+    if (!input.walkIn) {
+      let locationCity = '';
+      if (input.jobSiteAddress) {
+        const job = input.jobSiteAddress;
+        locationCity = job.cityMunicipality;
+        serviceLocationAddress =
+          [job.houseUnit, job.street, job.subdivision, job.barangay,
+           job.cityMunicipality, job.province, job.postalCode, job.region]
+            .filter(Boolean).join(', ');
+        locationPsgcCode = null;
+      } else {
+        const addressRows = await queryRows<
+          {
+            region: string | null;
+            province: string | null;
+            city_municipality: string | null;
+            barangay: string | null;
+            street: string | null;
+            house_unit: string | null;
+            subdivision: string | null;
+            postal_code: string | null;
+            barangay_code: string | null;
+            city_municipality_code: string | null;
+          } & import('mysql2/promise').RowDataPacket
+        >(connection,
+          `SELECT region, province, city_municipality, barangay, street, house_unit,
+                  subdivision, postal_code, barangay_code, city_municipality_code
+           FROM tbl_user_address WHERE user_id = ? AND is_primary = 1 LIMIT 1`,
+          [user.id]);
+        const address = addressRows[0];
+        if (!address || !address.region || !address.city_municipality || !address.barangay ||
+          !address.street || !address.house_unit || !address.postal_code ||
+          !/^\d{4}$/.test(address.postal_code)) {
+          throw new ApiError(409, 'Complete your Philippine address in your profile before submitting a new request.');
+        }
+        serviceLocationAddress =
+          [address.house_unit, address.street, address.subdivision, address.barangay,
+           address.city_municipality, address.province, address.postal_code, address.region]
+            .filter(Boolean).join(', ');
+        locationPsgcCode = address.barangay_code || address.city_municipality_code || null;
+        locationCity = address.city_municipality ?? '';
+      }
+      const isSantiagoCity = /^(Santiago City|Santiago)$/i.test(locationCity);
+      locationClassification = isSantiagoCity ? 'in_area' : 'outside_area';
+    }
     const customerName =
       input.walkIn
         ? input.customerName!
@@ -326,8 +391,21 @@ export async function POST(request: NextRequest) {
       optionLabel = quote.area ? `${option.label} (${input.width} x ${input.height})` : option.label;
     }
     const total = input.walkIn ? input.amount ?? 0 : computedTotal;
+    let locationCharge = 0;
+    if (!input.walkIn && locationClassification === 'outside_area') {
+      const settingRows = await queryRows<{ setting_value: string } & import('mysql2/promise').RowDataPacket>(
+        connection,
+        'SELECT setting_value FROM tbl_app_setting WHERE setting_key = ? LIMIT 1',
+        ['outside_location_charge'],
+      );
+      locationCharge = Number(settingRows[0]?.setting_value ?? 0);
+      if (!Number.isFinite(locationCharge) || locationCharge < 0) {
+        throw new ApiError(409, 'The outside-area location charge is missing. Ask an administrator to set it.');
+      }
+    }
+    const finalTotal = total + locationCharge;
     const walkInPaid = input.walkIn ? input.paidAmount ?? 0 : 0;
-    if (!total || walkInPaid > total) throw new ApiError(400, 'Order amount or initial payment is invalid.');
+    if (!finalTotal || walkInPaid > finalTotal) throw new ApiError(400, 'Order amount or initial payment is invalid.');
     const orderNumber = `NETSO-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`;
 
     await connection.beginTransaction();
@@ -335,8 +413,9 @@ export async function POST(request: NextRequest) {
       `INSERT INTO tbl_print_order
         (order_number, user_id, service_id, customer_name, customer_email, customer_phone,
          service_name_snapshot, unit_price, quantity, page_count, paper_size, color_mode,
-         finish, notes, total_amount, payment_method, status, progress_stage)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid Balance', 1)`,
+         finish, notes, service_location_address, service_location_classification,
+         location_charge, location_psgc_code, total_amount, payment_method, status, progress_stage)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid Balance', 1)`,
       [
         orderNumber,
         input.walkIn ? null : user.id,
@@ -352,7 +431,11 @@ export async function POST(request: NextRequest) {
         input.colorMode ?? null,
         input.finish ?? null,
         input.notes,
-        total,
+        serviceLocationAddress,
+        locationClassification,
+        locationCharge,
+        locationPsgcCode,
+        finalTotal,
         input.paymentMethod,
       ],
     );
@@ -369,7 +452,7 @@ export async function POST(request: NextRequest) {
         [
           `TXN-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`,
           insertId,
-          walkInPaid >= total ? 'full_payment' : 'deposit',
+          walkInPaid >= finalTotal ? 'full_payment' : 'deposit',
           walkInPaid,
           paymentStatus,
           verifiedByCashier ? user.id : null,
@@ -386,7 +469,7 @@ export async function POST(request: NextRequest) {
     await recordAuditEvent(request, user, {
       category: 'Order Management',
       action: input.walkIn ? 'Created walk-in service request' : 'Placed service request',
-      details: `${service.service_name}; ${input.paymentMethod}; total ₱${total.toFixed(2)}.`,
+      details: `${service.service_name}; ${input.paymentMethod}; total ₱${finalTotal.toFixed(2)}; location charge ₱${locationCharge.toFixed(2)}.`,
       targetId: orderNumber,
     });
     publishRealtimeEvent({
@@ -411,9 +494,9 @@ export async function POST(request: NextRequest) {
           category: service.category_name,
           specs: { paperSize: input.paperSize, pages: input.pages, copies: input.quantity, colorMode: input.colorMode, finish: input.finish },
           date: new Date().toISOString().slice(0, 10),
-          amount: total,
+          amount: finalTotal,
           paidAmount: 0,
-          unpaidAmount: total,
+          unpaidAmount: finalTotal,
           status: 'Unpaid Balance',
           progressStage: 1,
           notes: input.notes,

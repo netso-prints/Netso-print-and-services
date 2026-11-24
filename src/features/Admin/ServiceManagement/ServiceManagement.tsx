@@ -30,6 +30,8 @@ interface AdminService {
   turnaround: string;
   available: boolean;
   options: ServiceOption[];
+  signageType?: 'panaprint-panaflex' | 'acrylic' | 'cut-out';
+  signageConfig?: Record<string, unknown>;
 }
 
 interface OptionForm {
@@ -53,6 +55,8 @@ interface ServiceForm {
   popularFor: string;
   description: string;
   options: OptionForm[];
+  signageType?: 'panaprint-panaflex' | 'acrylic' | 'cut-out';
+  signageConfig: Record<string, unknown>;
 }
 
 const CATEGORIES = ['Document', 'Photo & ID', 'Large Format', 'Signage', 'Merch & Gifts', 'Marketing'];
@@ -123,6 +127,7 @@ export function ServiceManagement({
       popularFor: '',
       description: '',
       options: [blankOption()],
+      signageConfig: {},
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -138,6 +143,8 @@ export function ServiceManagement({
       popularFor: service.popularFor,
       description: service.description,
       options: service.options.length ? service.options.map(optionToForm) : [blankOption()],
+      signageType: service.signageType,
+      signageConfig: service.signageConfig ?? {},
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -216,6 +223,8 @@ export function ServiceManagement({
           popularFor: form.popularFor.trim() || undefined,
           description: form.description,
           options,
+          signageType: form.category === 'Signage' ? form.signageType : undefined,
+          signageConfig: form.category === 'Signage' ? form.signageConfig : undefined,
         }),
       });
       const result = await response.json();
@@ -334,6 +343,23 @@ export function ServiceManagement({
                 </option>
               ))}
             </select>
+            {form.category === 'Signage' && (
+              <select
+                required
+                value={form.signageType ?? ''}
+                onChange={(e) => setForm({
+                  ...form,
+                  signageType: e.target.value as 'panaprint-panaflex' | 'acrylic' | 'cut-out',
+                  signageConfig: {},
+                })}
+                className={INPUT}
+              >
+                <option value="" disabled>Select signage type</option>
+                <option value="panaprint-panaflex">Panaprint/Panaflex</option>
+                <option value="acrylic">Acrylic</option>
+                <option value="cut-out">Cut-out Signage</option>
+              </select>
+            )}
             <input
               required
               maxLength={40}
