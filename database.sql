@@ -213,11 +213,14 @@ CREATE TABLE IF NOT EXISTS tbl_print_order (
     paper_size            VARCHAR(100)   NULL,
     color_mode            VARCHAR(30)    NULL,
     finish                VARCHAR(255)   NULL,
+    signage_details_json  JSON            NULL,
     notes                 TEXT           NULL,
     service_location_address TEXT        NULL,
     service_location_classification VARCHAR(20) NULL,
     location_charge       DECIMAL(10,2)  NOT NULL DEFAULT 0,
     location_psgc_code    VARCHAR(20)    NULL,
+    agreement_terms_snapshot TEXT         NULL,
+    agreement_terms_version_snapshot VARCHAR(60) NULL,
     total_amount          DECIMAL(10,2)  NOT NULL,
     payment_method        VARCHAR(30)    NULL,
     status                VARCHAR(32)    NOT NULL DEFAULT 'Unpaid Balance',
@@ -251,7 +254,7 @@ CREATE TABLE IF NOT EXISTS tbl_print_order (
 
 CREATE TABLE IF NOT EXISTS tbl_app_setting (
     setting_key   VARCHAR(100) NOT NULL,
-    setting_value VARCHAR(255) NOT NULL,
+    setting_value TEXT          NOT NULL,
     updated_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
                               ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (setting_key)
@@ -259,6 +262,21 @@ CREATE TABLE IF NOT EXISTS tbl_app_setting (
 
 INSERT INTO tbl_app_setting (setting_key, setting_value)
 VALUES ('gcash_enabled', '0')
+ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key);
+
+INSERT INTO tbl_app_setting (setting_key, setting_value) VALUES
+    ('outside_location_charge', '0'),
+    ('agreement_threshold', '5000'),
+    ('agreement_threshold_includes_location_charge', '1'),
+    ('agreement_threshold_inclusive', '1'),
+    ('inside_area_city_codes', ''),
+    ('allow_job_site_address', '0'),
+    ('agreement_statuses', 'In Pre-Press,In Production,Ready for Pickup,Completed'),
+    ('agreement_terms', 'The parties confirm the saved order specifications and amount. NETSO may proceed only after production authorization.'),
+    ('agreement_terms_version', 'draft-1'),
+    ('unnamed_street_fallback', 'If there is no named street, enter a clear location description.'),
+    ('unnumbered_premises_fallback', 'If the premises have no number, enter a clear house or premises description.'),
+    ('prefill_partial_legacy_addresses', '0')
 ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key);
 
 CREATE TABLE IF NOT EXISTS tbl_print_order_file (

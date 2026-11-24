@@ -3,11 +3,28 @@ import { NextResponse } from 'next/server';
 import { requireSession, isStaffRole } from '@/lib/server/auth';
 import { apiErrorResponse, ApiError } from '@/lib/server/http';
 import { mysqlPool, queryRows } from '@/lib/server/mysql';
+import { isAgreementEligible, loadAgreementRules } from '@/lib/server/agreement';
 
 export const runtime = 'nodejs';
 
 function pdfEscape(text: string): string {
-  return text.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+  return text.replace(/[^\x20-\x7E]/g, '?').replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+
+function wrapText(text: string, width: number): string[] {
+  const words = text.replace(/\s+/g, ' ').trim().split(' ');
+  const wrapped: string[] = [];
+  let current = '';
+  for (const word of words) {
+    if (current && `${current} ${word}`.length > width) {
+      wrapped.push(current);
+      current = word;
+    } else {
+      current = current ? `${current} ${word}` : word;
+    }
+  }
+  if (current) wrapped.push(current);
+  return wrapped;
 }
 
 function buildSimplePdf(lines: string[]): Buffer {
@@ -65,18 +82,22 @@ export async function GET(
         customer_name: string;
         service_name_snapshot: string;
         paper_size: string | null;
+        signage_details_json: string | null;
         quantity: number;
         page_count: number | null;
         total_amount: string | number;
         location_charge: string | number;
         service_location_address: string | null;
+        agreement_terms_snapshot: string | null;
+        agreement_terms_version_snapshot: string | null;
         status: string;
         created_at: Date;
       } & import('mysql2/promise').RowDataPacket
     >(mysqlPool,
       `SELECT ID, order_number, user_id, customer_name, service_name_snapshot,
-              paper_size, quantity, page_count, total_amount, location_charge,
-              service_location_address, status, created_at
+              paper_size, signage_details_json, quantity, page_count, total_amount, location_charge,
+              service_location_address, agreement_terms_snapshot,
+              agreement_terms_version_snapshot, status, created_at
        FROM tbl_print_order WHERE order_number = ? LIMIT 1`,
       [orderId]);
     const order = rows[0];
@@ -85,18 +106,43 @@ export async function GET(
       throw new ApiError(403, 'You are not allowed to download this agreement.');
     }
 
-    const settingRows = await queryRows<{ setting_value: string } & import('mysql2/promise').RowDataPacket>(
-      mysqlPool,
-      'SELECT setting_value FROM tbl_app_setting WHERE setting_key = ? LIMIT 1',
-      ['agreement_threshold'],
-    );
-    const threshold = Number(settingRows[0]?.setting_value ?? 5000);
+    const agreementRules = await loadAgreementRules(mysqlPool);
     const total = Number(order.total_amount);
-    const eligibleStatuses = new Set(['In Pre-Press', 'In Production', 'Ready for Pickup', 'Completed']);
-    if (!eligibleStatuses.has(order.status) || total < threshold) {
+    // Eligibility rules live in isAgreementEligible (statuses and threshold await client approval).
+    if (!isAgreementEligible(
+      order.status,
+      total,
+      agreementRules.threshold,
+      agreementRules.statuses,
+      Number(order.location_charge),
+      agreementRules.includesLocationCharge,
+      agreementRules.thresholdInclusive,
+    )) {
       throw new ApiError(409, 'This order is not currently eligible for a Service Order Agreement.');
     }
 
+    const paidRows = await queryRows<{ paid: string | number | null } & import('mysql2/promise').RowDataPacket>(
+      mysqlPool,
+      "SELECT COALESCE(SUM(amount), 0) AS paid FROM tbl_payments WHERE print_order_id = ? AND status = 'verified'",
+      [order.ID],
+    );
+    const paid = Number(paidRows[0]?.paid ?? 0);
+    const termRows = await queryRows<
+      { setting_key: string; setting_value: string } & import('mysql2/promise').RowDataPacket
+    >(
+      mysqlPool,
+      "SELECT setting_key, setting_value FROM tbl_app_setting WHERE setting_key IN ('agreement_terms', 'agreement_terms_version')",
+    );
+    const termsText = order.agreement_terms_snapshot?.trim() ||
+      termRows.find((row) => row.setting_key === 'agreement_terms')?.setting_value?.trim() ||
+      'The parties confirm the saved order specifications and amount. NETSO may proceed only after production authorization.';
+    const termsVersion = order.agreement_terms_version_snapshot?.trim() ||
+      termRows.find((row) => row.setting_key === 'agreement_terms_version')?.setting_value?.trim() || 'draft';
+    const signageDetails = order.signage_details_json
+      ? Object.entries(JSON.parse(order.signage_details_json) as Record<string, string>)
+          .map(([key, value]) => `${key}: ${value}`)
+          .join('; ')
+      : '';
     const created = new Date(order.created_at).toLocaleString('en-PH', {
       timeZone: 'Asia/Manila',
       dateStyle: 'long',
@@ -109,13 +155,16 @@ export async function GET(
       `Order Date and Time (Philippines): ${created}`,
       `Service: ${order.service_name_snapshot}`,
       `Size: ${order.paper_size || 'As specified'}`,
+      ...(signageDetails ? [`Signage Specifications: ${signageDetails}`] : []),
       `Quantity: ${order.quantity}${order.page_count ? `; Pages: ${order.page_count}` : ''}`,
       `Service Location: ${order.service_location_address || 'Stored profile address'}`,
       `Location Charge: PHP ${Number(order.location_charge).toFixed(2)}`,
       `Order Amount: PHP ${total.toFixed(2)}`,
+      `Payment Status: PHP ${paid.toFixed(2)} paid; balance PHP ${Math.max(0, total - paid).toFixed(2)}`,
       '',
-      'Terms: The parties confirm the saved order specifications and amount.',
-      'NETSO may proceed only after production authorization.',
+      `Terms (version ${termsVersion}):`,
+      ...wrapText(termsText, 85),
+      'Order details above are taken from the saved order record.',
       '',
       'Customer Signature: ____________________    Date: __________',
       'NETSO Signature: ______________________    Date: __________',

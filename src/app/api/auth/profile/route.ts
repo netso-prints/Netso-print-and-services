@@ -13,6 +13,14 @@ import { apiErrorResponse, ApiError, assertSameOrigin, readJson } from '@/lib/se
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { mysqlPool, queryRows } from '@/lib/server/mysql';
 import { recordAuditEvent } from '@/lib/server/audit';
+import {
+  SANTIAGO_CITY_PSGC,
+  classifyByCode,
+  isJobSiteAllowed,
+  loadInAreaCodes,
+  loadOutsideCharge,
+} from '@/lib/server/location';
+import { loadAddressPolicySettings } from '@/lib/server/week16-settings';
 
 export const runtime = 'nodejs';
 
@@ -22,13 +30,13 @@ const schema = z.object({
   newPassword: z.string().min(12).max(128).optional(),
   address: z.object({
     region: z.string().trim().min(1).max(100),
-    regionCode: z.string().trim().min(1).max(20).optional(),
+    regionCode: z.string().trim().min(1).max(20),
     province: z.string().trim().max(100).optional(),
     provinceCode: z.string().trim().max(20).optional(),
     cityMunicipality: z.string().trim().min(1).max(100),
-    cityMunicipalityCode: z.string().trim().min(1).max(20).optional(),
+    cityMunicipalityCode: z.string().trim().min(1).max(20),
     barangay: z.string().trim().min(1).max(100),
-    barangayCode: z.string().trim().min(1).max(20).optional(),
+    barangayCode: z.string().trim().min(1).max(20),
     street: z.string().trim().min(1).max(150),
     houseUnit: z.string().trim().min(1).max(150),
     subdivision: z.string().trim().max(150).optional(),
@@ -45,6 +53,45 @@ const schema = z.object({
   }
 });
 
+type GeoItem = { code?: string; psgcCode?: string };
+const PSGC_BASE = 'https://psgc.gitlab.io/api';
+
+async function psgcCodes(path: string): Promise<Set<string>> {
+  const response = await fetch(`${PSGC_BASE}${path}`, {
+    headers: { Accept: 'application/json' },
+    cache: 'force-cache',
+  });
+  if (!response.ok) {
+    throw new ApiError(502, 'The official geographic reference is unavailable. Try again later.');
+  }
+  const items: unknown = await response.json();
+  if (!Array.isArray(items)) {
+    throw new ApiError(502, 'The geographic reference returned invalid data.');
+  }
+  return new Set((items as GeoItem[]).map((item) => String(item.code ?? item.psgcCode ?? '')));
+}
+
+async function assertGeographyMatches(address: {
+  regionCode: string;
+  provinceCode?: string;
+  cityMunicipalityCode: string;
+  barangayCode: string;
+}) {
+  const cityPath = address.provinceCode
+    ? `/provinces/${encodeURIComponent(address.provinceCode)}/cities-municipalities`
+    : `/regions/${encodeURIComponent(address.regionCode)}/cities-municipalities`;
+  const [cities, barangays] = await Promise.all([
+    psgcCodes(cityPath),
+    psgcCodes(`/cities-municipalities/${encodeURIComponent(address.cityMunicipalityCode)}/barangays`),
+  ]);
+  if (!cities.has(address.cityMunicipalityCode)) {
+    throw new ApiError(400, 'The city or municipality does not belong to the selected province or region.');
+  }
+  if (!barangays.has(address.barangayCode)) {
+    throw new ApiError(400, 'The barangay does not belong to the selected city or municipality.');
+  }
+}
+
 export async function GET(request: NextRequest) {
   try {
     const user = await requireSession(request, ['customer']);
@@ -52,44 +99,64 @@ export async function GET(request: NextRequest) {
       {
         region: string | null;
         region_code: string | null;
+        address_label: string;
         province: string | null;
         province_code: string | null;
         city_municipality: string | null;
         city_municipality_code: string | null;
+        municipality: string | null;
         barangay: string | null;
         barangay_code: string | null;
         street: string | null;
         house_unit: string | null;
         subdivision: string | null;
         postal_code: string | null;
+        zip_code: string | null;
         landmark: string | null;
       } & import('mysql2/promise').RowDataPacket
     >(
       mysqlPool,
-      `SELECT region, region_code, province, province_code, city_municipality,
-              city_municipality_code, barangay, barangay_code, street, house_unit,
-              subdivision, postal_code, landmark
+      `SELECT address_label, region, region_code, province, province_code, city_municipality,
+              city_municipality_code, municipality, barangay, barangay_code, street, house_unit,
+              subdivision, postal_code, zip_code, landmark
        FROM tbl_user_address WHERE user_id = ? AND is_primary = 1 LIMIT 1`,
       [user.id],
     );
     const address = rows[0];
+    const classification = address?.city_municipality
+      ? classifyByCode(
+          address.city_municipality_code,
+          address.city_municipality,
+          address.province,
+          await loadInAreaCodes(mysqlPool),
+        )
+      : null;
+    const outsideCharge = classification === 'outside_area' ? await loadOutsideCharge(mysqlPool) : 0;
     return NextResponse.json({
       ok: true,
       address: address ? {
+        addressLabel: address.address_label,
         region: address.region ?? '',
         regionCode: address.region_code ?? '',
         province: address.province ?? '',
         provinceCode: address.province_code ?? '',
-        cityMunicipality: address.city_municipality ?? '',
+        cityMunicipality: address.city_municipality ?? address.municipality ?? '',
         cityMunicipalityCode: address.city_municipality_code ?? '',
         barangay: address.barangay ?? '',
         barangayCode: address.barangay_code ?? '',
         street: address.street ?? '',
         houseUnit: address.house_unit ?? '',
         subdivision: address.subdivision ?? '',
-        postalCode: address.postal_code ?? '',
+        postalCode: address.postal_code ?? address.zip_code ?? '',
         landmark: address.landmark ?? '',
       } : null,
+      addressPolicy: await loadAddressPolicySettings(mysqlPool),
+      location: {
+        classification,
+        charge: outsideCharge ?? 0,
+        chargeConfigured: outsideCharge !== null,
+        jobSiteAllowed: await isJobSiteAllowed(mysqlPool),
+      },
     });
   } catch (error) {
     return apiErrorResponse(error);
@@ -102,6 +169,12 @@ export async function PATCH(request: NextRequest) {
     const user = await requireSession(request, ['customer']);
     await enforceRateLimit(request, `profile:${user.id}`, 10, 60_000);
     const parsed = schema.safeParse(await readJson(request));
+    if (!parsed.success && parsed.error.issues.some((issue) => issue.path[0] === 'address')) {
+      throw new ApiError(
+        400,
+        'Complete every required address field: region, city or municipality, barangay, street, house or unit, and a 4-digit postal code.',
+      );
+    }
     if (!parsed.success) {
       throw new ApiError(
         400,
@@ -149,8 +222,9 @@ export async function PATCH(request: NextRequest) {
       [username, passwordHash, user.id],
     );
     if (address) {
+      await assertGeographyMatches(address);
       const isNcr = /national capital region|ncr/i.test(address.region);
-      const isIndependentCity = /santiago/i.test(address.cityMunicipality);
+      const isIndependentCity = address.cityMunicipalityCode === SANTIAGO_CITY_PSGC;
       if (!isNcr && !isIndependentCity && !address.province) {
         throw new ApiError(400, 'Province is required for provincial cities and municipalities.');
       }

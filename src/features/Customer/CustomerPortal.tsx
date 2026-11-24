@@ -43,12 +43,19 @@ import { Sidebar } from '../../components/Sidebar';
 import { useFeedback } from '../../components/feedback/FeedbackProvider';
 import { computeQuote, describeOption, sortedTiers, type ServiceOption } from '@/lib/pricing';
 import { iconFor } from '@/lib/service-icons';
+import { type SignageField, type SignageRule, type SignageType } from '@/lib/signage';
+import { AddressForm } from '../CustomerProfile/AddressForm';
+import { JobSiteAddress, type JobSiteValue } from '../CustomerProfile/JobSiteAddress';
+import { downloadAgreement } from '@/lib/agreement-download';
 
 export type { FontSizeLevel } from '../../types/portal';
 type CustomerTabId = 'dashboard' | 'services' | 'requests' | 'payments' | 'messages' | 'profile';
 
 export interface CustomerServiceItem {
   options?: ServiceOption[];
+  signageType?: SignageType | null;
+  signageConfig?: Record<string, string>;
+  signageRule?: SignageRule;
   id: string;
   name: string;
   category: 'Document' | 'Photo & ID' | 'Large Format' | 'Signage' | 'Merch & Gifts' | 'Marketing';
@@ -410,6 +417,7 @@ export function CustomerPortal({
   const [requestOptionId, setRequestOptionId] = useState<string>('');
   const [requestWidth, setRequestWidth] = useState<string>('');
   const [requestHeight, setRequestHeight] = useState<string>('');
+  const [requestSignageConfig, setRequestSignageConfig] = useState<Record<string, string>>({});
   const [requestFileType, setRequestFileType] = useState<string>(
     'I have ready-to-print artwork file (PDF/PNG)'
   );
@@ -442,6 +450,90 @@ export function CustomerPortal({
   const [isSavingAccount, setIsSavingAccount] = useState(false);
   const [accountError, setAccountError] = useState('');
   const [accountSuccess, setAccountSuccess] = useState('');
+  const [profileAddress, setProfileAddress] = useState<{
+    complete: boolean;
+    classification: 'in_area' | 'outside_area' | null;
+    charge: number;
+    chargeConfigured: boolean;
+    label: string;
+  } | null>(null);
+  const [pendingRequestService, setPendingRequestService] = useState<CustomerServiceItem | null | undefined>(undefined);
+  const skipAddressGateRef = useRef(false);
+  const [jobSiteAllowed, setJobSiteAllowed] = useState(false);
+  const [useJobSite, setUseJobSite] = useState(false);
+  const [jobSite, setJobSite] = useState<JobSiteValue | null>(null);
+  const [jobSitePreview, setJobSitePreview] = useState<{
+    classification: 'in_area' | 'outside_area' | null;
+    charge: number;
+    chargeConfigured: boolean;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!useJobSite || !jobSite) {
+      setJobSitePreview(null);
+      return;
+    }
+    let active = true;
+    const params = new URLSearchParams({
+      cityCode: jobSite.cityMunicipalityCode,
+      city: jobSite.cityMunicipality,
+      province: jobSite.province ?? '',
+    });
+    fetch(`/api/location-preview?${params.toString()}`, { credentials: 'same-origin' })
+      .then((response) => response.json())
+      .then((result) => {
+        if (!active || !result.ok) return;
+        setJobSitePreview({
+          classification: result.classification ?? null,
+          charge: Number(result.charge ?? 0),
+          chargeConfigured: Boolean(result.chargeConfigured),
+        });
+      })
+      .catch(() => {
+        if (active) setJobSitePreview(null);
+      });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useJobSite, jobSite?.cityMunicipalityCode]);
+
+  const loadProfileAddress = async () => {
+    try {
+      const response = await fetch('/api/auth/profile', { credentials: 'same-origin' });
+      const result = await response.json();
+      if (!response.ok || !result.ok) return;
+      const saved = result.address;
+      const complete = Boolean(
+        saved &&
+          saved.region &&
+          saved.cityMunicipality &&
+          saved.barangay &&
+          saved.street &&
+          saved.houseUnit &&
+          /^\d{4}$/.test(saved.postalCode ?? ''),
+      );
+      setJobSiteAllowed(Boolean(result.location?.jobSiteAllowed));
+      setProfileAddress({
+        complete,
+        classification: result.location?.classification ?? null,
+        charge: Number(result.location?.charge ?? 0),
+        chargeConfigured: Boolean(result.location?.chargeConfigured),
+        label: saved
+          ? [saved.houseUnit, saved.street, saved.subdivision, saved.barangay, saved.cityMunicipality, saved.province, saved.postalCode, saved.region]
+              .filter(Boolean)
+              .join(', ')
+          : '',
+      });
+    } catch {
+      // Leave the status unknown; the server still checks the address on submit.
+    }
+  };
+
+  React.useEffect(() => {
+    void loadProfileAddress();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const customerRequests = useMemo(
     () =>
@@ -491,6 +583,9 @@ export function CustomerPortal({
           popularFor: string;
           turnaround: string;
           available: boolean;
+          signageType?: SignageType | null;
+          signageConfig?: Record<string, string>;
+          signageRule?: SignageRule;
         }) => {
           const fallback = byId.get(service.id) ?? { icon: Printer };
           return fallback
@@ -498,6 +593,7 @@ export function CustomerPortal({
                 ...fallback,
                 ...service,
                 options: (service as { options?: ServiceOption[] }).options ?? [],
+                signageConfig: service.signageConfig ?? {},
                 icon: iconFor((service as { iconName?: string | null }).iconName, fallback.icon),
               }]
             : [];
@@ -644,6 +740,18 @@ export function CustomerPortal({
       ? selectedServiceForRequest.basePrice * requestPages * requestQty
       : 0;
   const requestDimUnit = selectedRequestOption?.unit.includes('sq.in') ? 'in' : 'ft';
+  const activeLocation = useJobSite
+    ? jobSitePreview
+    : profileAddress
+      ? {
+          classification: profileAddress.classification,
+          charge: profileAddress.charge,
+          chargeConfigured: profileAddress.chargeConfigured,
+        }
+      : null;
+  const locationCharge = activeLocation?.classification === 'outside_area' ? activeLocation.charge : 0;
+  const locationBlocked = activeLocation?.classification === 'outside_area' && !activeLocation.chargeConfigured;
+  const requestGrandTotal = (requestQuote && !requestQuote.ok ? 0 : requestTotal) + locationCharge;
 
   React.useEffect(() => {
     if (!isNewRequestModalOpen) return;
@@ -671,12 +779,30 @@ export function CustomerPortal({
     }
   };
 
+  const handleAgreementDownload = async (orderId: string) => {
+    const result = await downloadAgreement(orderId);
+    if (!result.ok) {
+      notify(`${result.error} Select the Service Order Agreement button again to retry.`, 'error');
+    }
+  };
+
   const handleOpenNewRequest = (service?: CustomerServiceItem) => {
+    if (!skipAddressGateRef.current && profileAddress && !profileAddress.complete) {
+      setPendingRequestService(service ?? null);
+      setActiveTab('profile');
+      notify('Save your complete Philippine address in your profile before submitting a new request.', 'error');
+      return;
+    }
+    skipAddressGateRef.current = false;
+    setUseJobSite(false);
+    setJobSite(null);
+    setJobSitePreview(null);
     const initialService = service || serviceCatalog[0] || null;
     setSelectedServiceForRequest(initialService);
     setRequestOptionId(initialService?.options?.find((option) => option.available)?.id ?? '');
     setRequestWidth('');
     setRequestHeight('');
+    setRequestSignageConfig({});
     setRequestQty(1);
     setRequestPages(1);
     setRequestPaymentMethod('Cash on Pickup');
@@ -691,6 +817,12 @@ export function CustomerPortal({
     if (!selectedServiceForRequest) return;
 
     try {
+      if (useJobSite && !jobSite) {
+        throw new Error('Complete the job site address, or switch back to your profile address.');
+      }
+      if (locationBlocked) {
+        throw new Error('The outside-area location charge has not been set yet. Please contact NETSO before ordering.');
+      }
       if (requestQuote && !requestQuote.ok) {
         throw new Error(requestQuote.error ?? 'Check the quantity and size.');
       }
@@ -706,6 +838,8 @@ export function CustomerPortal({
           height: selectedRequestOption?.pricingMode === 'area' ? Number(requestHeight) : undefined,
           paymentMethod: requestPaymentMethod,
           notes: requestNotes ? `${requestFileType} - ${requestNotes}` : requestFileType,
+          signageConfig: selectedServiceForRequest.signageType ? requestSignageConfig : undefined,
+          jobSiteAddress: useJobSite && jobSite ? jobSite : undefined,
         }),
       });
       const orderResult = await orderResponse.json();
@@ -1691,6 +1825,21 @@ export function CustomerPortal({
                           <span>View Official Receipt</span>
                         </button>
                       ) : null}
+                      {req.agreementEligible && (
+                        <a
+                          href={`/api/orders/${encodeURIComponent(req.id)}/agreement`}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            void handleAgreementDownload(req.id);
+                          }}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-4 py-2 border border-[#D4A017] bg-white hover:bg-amber-50 text-[#8A6500] font-bold text-xs sm:text-sm rounded-xl flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <FileText className="w-4 h-4" />
+                          <span>Service Order Agreement (PDF)</span>
+                        </a>
+                      )}
                       {req.status === 'Unpaid Balance' && req.progressStage === 1 && req.paidAmount === 0 && (
                         <button
                           type="button"
@@ -1909,6 +2058,20 @@ export function CustomerPortal({
                   Log Out
                 </button>
               </div>
+              <AddressForm
+                username={accountUsername}
+                required={profileAddress ? !profileAddress.complete : false}
+                onSaved={() => {
+                  void loadProfileAddress().then(() => {
+                    if (pendingRequestService === undefined) return;
+                    const service = pendingRequestService ?? undefined;
+                    setPendingRequestService(undefined);
+                    setActiveTab('services');
+                    skipAddressGateRef.current = true;
+                    handleOpenNewRequest(service);
+                  });
+                }}
+              />
               <form onSubmit={handleUpdateAccount} className="space-y-3 border-t border-zinc-200 pt-4">
                 <h3 className="font-extrabold text-lg">Account Settings</h3>
                 <div>
@@ -2115,6 +2278,7 @@ export function CustomerPortal({
                       setRequestOptionId(found.options?.find((option) => option.available)?.id ?? '');
                       setRequestWidth('');
                       setRequestHeight('');
+                      setRequestSignageConfig({});
                     }
                   }}
                   className="w-full border border-zinc-400 bg-white px-3.5 py-2.5 rounded-xl font-bold text-sm sm:text-base text-zinc-950 focus:outline-none focus:ring-2 focus:ring-[#D4A017]"
@@ -2128,6 +2292,52 @@ export function CustomerPortal({
                   ))}
                 </select>
               </div>
+
+              {selectedServiceForRequest.signageType && selectedServiceForRequest.signageRule && (
+                <div className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 p-3">
+                  <h4 className="font-extrabold text-sm">
+                    {selectedServiceForRequest.signageRule.label} specifications
+                  </h4>
+                  <p className="text-xs text-zinc-600">
+                    {selectedServiceForRequest.signageRule.help}
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {selectedServiceForRequest.signageRule.fields.map((field: SignageField) => (
+                      <label key={field.key} className="text-xs font-bold text-zinc-800">
+                        {field.label}{field.required ? ' *' : ''}
+                        {field.options ? (
+                          <select
+                            required={field.required}
+                            value={requestSignageConfig[field.key] ?? ''}
+                            onChange={(event) => setRequestSignageConfig((current) => ({
+                              ...current,
+                              [field.key]: event.target.value,
+                            }))}
+                            className="mt-1 w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-950"
+                          >
+                            <option value="">{field.required ? 'Select' : 'Not specified'}</option>
+                            {field.options.map((option) => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            required={field.required}
+                            maxLength={100}
+                            placeholder={field.placeholder}
+                            value={requestSignageConfig[field.key] ?? ''}
+                            onChange={(event) => setRequestSignageConfig((current) => ({
+                              ...current,
+                              [field.key]: event.target.value,
+                            }))}
+                            className="mt-1 w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-950"
+                          />
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="font-extrabold text-xs sm:text-sm text-zinc-900 block mb-1.5">
@@ -2305,6 +2515,56 @@ export function CustomerPortal({
                   placeholder="E.g., Size (8x4ft), grommet placement on 4 corners, glossy laminate finish..."
                   className="w-full border border-zinc-400 bg-white px-3.5 py-2.5 rounded-xl font-medium text-sm text-zinc-950 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#D4A017]"
                 />
+              </div>
+
+              {jobSiteAllowed && (
+                <div className="rounded-xl border border-zinc-300 bg-white p-3.5 space-y-2.5">
+                  <label className="flex items-center gap-2 text-xs sm:text-sm font-bold text-zinc-900">
+                    <input
+                      type="checkbox"
+                      checked={useJobSite}
+                      onChange={(event) => {
+                        setUseJobSite(event.target.checked);
+                        if (!event.target.checked) {
+                          setJobSite(null);
+                          setJobSitePreview(null);
+                        }
+                      }}
+                    />
+                    Service at a different job site address
+                  </label>
+                  {useJobSite && <JobSiteAddress onChange={setJobSite} />}
+                </div>
+              )}
+
+              <div className="rounded-xl border border-zinc-300 bg-white p-3.5 text-xs sm:text-sm space-y-1.5">
+                <div className="flex justify-between gap-3">
+                  <span className="font-bold text-zinc-700">Service location</span>
+                  <span className="text-right font-medium text-zinc-900">
+                    {useJobSite && jobSite
+                      ? [jobSite.houseUnit, jobSite.street, jobSite.barangay, jobSite.cityMunicipality].filter(Boolean).join(', ')
+                      : profileAddress?.label || 'Your saved profile address'}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="font-bold text-zinc-700">
+                    Location charge ({activeLocation?.classification === 'outside_area' ? 'outside the service area' : 'inside the service area'})
+                  </span>
+                  <span className="font-mono font-black text-zinc-900">
+                    ₱{locationCharge.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                {locationBlocked && (
+                  <p role="alert" className="font-semibold text-red-700">
+                    The outside-area charge has not been set. Please contact NETSO before ordering.
+                  </p>
+                )}
+                <div className="flex justify-between gap-3 border-t border-zinc-200 pt-1.5">
+                  <span className="font-extrabold text-zinc-900">Total with location charge</span>
+                  <span className="font-mono font-black text-[#B8860B]">
+                    ₱{requestGrandTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </span>
+                </div>
               </div>
 
               <div className="bg-[#FFFBEB] border border-[#D4A017] rounded-xl p-3.5 flex items-center justify-between">
