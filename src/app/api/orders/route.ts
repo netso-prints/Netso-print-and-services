@@ -12,6 +12,11 @@ import { isGCashPaymentEnabled } from '@/lib/server/payment-settings';
 import { recordAuditEvent } from '@/lib/server/audit';
 import { computeQuote } from '@/lib/pricing';
 import { ensureServiceCatalog, loadOptionsForService } from '@/lib/server/service-options';
+import { classifyByCode, isJobSiteAllowed, loadInAreaCodes } from '@/lib/server/location';
+import { assertGeographyMatches } from '@/lib/server/psgc';
+import { isAgreementEligible, loadAgreementRules } from '@/lib/server/agreement';
+import { isSignageType, sanitizeSignageConfig } from '@/lib/signage';
+import { loadWeek16Settings } from '@/lib/server/week16-settings';
 
 export const runtime = 'nodejs';
 
@@ -23,6 +28,7 @@ const orderSchema = z.object({
   colorMode: z.enum(['Black & White', 'Colored']).optional(),
   finish: z.string().trim().max(255).optional(),
   optionId: z.string().trim().max(60).optional(),
+  signageConfig: z.record(z.string(), z.unknown()).optional(),
   width: z.number().positive().max(100000).optional(),
   height: z.number().positive().max(100000).optional(),
   notes: z.string().trim().max(5000).default(''),
@@ -37,6 +43,10 @@ const orderSchema = z.object({
     region: z.string().trim().min(1).max(100),
     province: z.string().trim().max(100).optional(),
     cityMunicipality: z.string().trim().min(1).max(100),
+    cityMunicipalityCode: z.string().trim().min(1).max(20),
+    regionCode: z.string().trim().min(1).max(20),
+    provinceCode: z.string().trim().max(20).optional(),
+    barangayCode: z.string().trim().min(1).max(20),
     barangay: z.string().trim().min(1).max(100),
     street: z.string().trim().min(1).max(150),
     houseUnit: z.string().trim().min(1).max(150),
@@ -75,12 +85,29 @@ type OrderRow = {
   quantity: number;
   color_mode: string | null;
   finish: string | null;
+  signage_details_json: string | Record<string, unknown> | null;
   service_location_address: string | null;
   service_location_classification: string | null;
   location_charge: string | number;
 };
 
-function toClientOrder(row: OrderRow, files: Array<{ ID: number; original_file_name: string; file_size_bytes: string | number | null; file_extension: string | null }>) {
+function toClientOrder(row: OrderRow, files: Array<{ ID: number; original_file_name: string; file_size_bytes: string | number | null; file_extension: string | null }>, agreementEligible = false) {
+  const parsedDetails = typeof row.signage_details_json === 'string'
+    ? JSON.parse(row.signage_details_json) as unknown
+    : row.signage_details_json;
+  if (
+    parsedDetails !== null &&
+    (typeof parsedDetails !== 'object' || Array.isArray(parsedDetails))
+  ) {
+    throw new ApiError(500, 'Saved signage order details are invalid.');
+  }
+  const serviceDetails = parsedDetails
+    ? Object.fromEntries(
+        Object.entries(parsedDetails).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string',
+        ),
+      )
+    : undefined;
   const amount = Number(row.total_amount);
   const paidAmount = Number(row.paid_amount);
   const unpaidAmount = Math.max(
@@ -113,6 +140,8 @@ function toClientOrder(row: OrderRow, files: Array<{ ID: number; original_file_n
     paymentMethod: row.payment_method ?? undefined,
     paymentVerified: paidAmount > 0,
     serviceLocation: row.service_location_address ?? '',
+    serviceDetails,
+    agreementEligible,
     locationClassification: row.service_location_classification ?? '',
     locationCharge: Number(row.location_charge),
     files: files.map((file) => ({
@@ -254,6 +283,7 @@ async function loadClientOrders(user: SessionUser) {
             o.service_name_snapshot, c.category_name, o.total_amount,
             COALESCE(p.paid_amount, 0) AS paid_amount, o.status, o.progress_stage, o.notes,
             o.created_at, o.payment_method, o.paper_size, o.page_count, o.quantity, o.color_mode, o.finish,
+            o.signage_details_json,
             o.service_location_address, o.service_location_classification, o.location_charge
      FROM tbl_print_order o
      JOIN tbl_services s ON s.ID = o.service_id
@@ -267,6 +297,7 @@ async function loadClientOrders(user: SessionUser) {
     values,
   );
   const idRows = rows;
+  const agreementRules = await loadAgreementRules(mysqlPool);
   if (!idRows.length) return [];
   const ids = idRows.map((row) => row.ID);
   const placeholders = ids.map(() => '?').join(', ');
@@ -284,7 +315,21 @@ async function loadClientOrders(user: SessionUser) {
     orderFiles.push(file);
     filesByOrder.set(file.print_order_id, orderFiles);
   }
-  return idRows.map((row) => toClientOrder(row, filesByOrder.get(row.ID) ?? []));
+  return idRows.map((row) =>
+    toClientOrder(
+      row,
+      filesByOrder.get(row.ID) ?? [],
+      isAgreementEligible(
+        row.status,
+        Number(row.total_amount),
+        agreementRules.threshold,
+        agreementRules.statuses,
+        Number(row.location_charge),
+        agreementRules.includesLocationCharge,
+        agreementRules.thresholdInclusive,
+      ),
+    ),
+  );
 }
 
 export async function POST(request: NextRequest) {
@@ -302,16 +347,29 @@ export async function POST(request: NextRequest) {
     }
 
     const services = await queryRows<
-      { ID: number; service_name: string; category_name: string; base_price: string | number; is_active: number } & import('mysql2/promise').RowDataPacket
+      { ID: number; service_name: string; category_name: string; base_price: string | number; is_active: number; signage_type: string | null } & import('mysql2/promise').RowDataPacket
     >(
       connection,
-      `SELECT s.ID, s.service_name, c.category_name, s.base_price, s.is_active
+      `SELECT s.ID, s.service_name, c.category_name, s.base_price, s.is_active, s.signage_type
        FROM tbl_services s JOIN tbl_service_category c ON c.ID = s.category_id
        WHERE (s.service_code = ? OR s.service_name = ?) LIMIT 1`,
       [input.service, input.service],
     );
     const service = services[0];
     if (!service || !service.is_active) throw new ApiError(400, 'Selected service is unavailable.');
+    const week16Settings = await loadWeek16Settings(connection);
+    let signageDetailsJson: string | null = null;
+    if (!input.walkIn && isSignageType(service.signage_type)) {
+      const checked = sanitizeSignageConfig(
+        service.signage_type,
+        input.signageConfig,
+        week16Settings.signageRules,
+      );
+      if (checked.error) throw new ApiError(400, checked.error);
+      signageDetailsJson = JSON.stringify(checked.config);
+    } else if (input.signageConfig && Object.keys(input.signageConfig).length > 0) {
+      throw new ApiError(400, 'Signage specifications do not apply to this service.');
+    }
 
     const users = input.walkIn
       ? []
@@ -325,14 +383,25 @@ export async function POST(request: NextRequest) {
     let locationClassification: 'in_area' | 'outside_area' | null = null;
     if (!input.walkIn) {
       let locationCity = '';
+      let locationProvince: string | null = null;
+      let locationCityCode: string | null = null;
       if (input.jobSiteAddress) {
+        if (!(await isJobSiteAllowed(connection))) {
+          throw new ApiError(
+            409,
+            'A separate job site address is not available. Your profile address is used as the service location.',
+          );
+        }
+        await assertGeographyMatches(input.jobSiteAddress);
         const job = input.jobSiteAddress;
         locationCity = job.cityMunicipality;
+        locationProvince = job.province ?? null;
+        locationCityCode = job.cityMunicipalityCode;
         serviceLocationAddress =
           [job.houseUnit, job.street, job.subdivision, job.barangay,
            job.cityMunicipality, job.province, job.postalCode, job.region]
             .filter(Boolean).join(', ');
-        locationPsgcCode = null;
+        locationPsgcCode = job.barangayCode;
       } else {
         const addressRows = await queryRows<
           {
@@ -364,8 +433,11 @@ export async function POST(request: NextRequest) {
             .filter(Boolean).join(', ');
         locationPsgcCode = address.barangay_code || address.city_municipality_code || null;
         locationCity = address.city_municipality ?? '';
+        locationProvince = address.province;
+        locationCityCode = address.city_municipality_code;
       }
-      const isSantiagoCity = /^(Santiago City|Santiago)$/i.test(locationCity);
+      const inAreaCodes = await loadInAreaCodes(connection);
+      const isSantiagoCity = classifyByCode(locationCityCode, locationCity, locationProvince, inAreaCodes) === 'in_area';
       locationClassification = isSantiagoCity ? 'in_area' : 'outside_area';
     }
     const customerName =
@@ -398,8 +470,9 @@ export async function POST(request: NextRequest) {
         'SELECT setting_value FROM tbl_app_setting WHERE setting_key = ? LIMIT 1',
         ['outside_location_charge'],
       );
-      locationCharge = Number(settingRows[0]?.setting_value ?? 0);
-      if (!Number.isFinite(locationCharge) || locationCharge < 0) {
+      const configuredCharge = Number(settingRows[0]?.setting_value);
+      locationCharge = Number.isFinite(configuredCharge) ? configuredCharge : 0;
+      if (!Number.isFinite(configuredCharge) || configuredCharge <= 0) {
         throw new ApiError(409, 'The outside-area location charge is missing. Ask an administrator to set it.');
       }
     }
@@ -413,9 +486,10 @@ export async function POST(request: NextRequest) {
       `INSERT INTO tbl_print_order
         (order_number, user_id, service_id, customer_name, customer_email, customer_phone,
          service_name_snapshot, unit_price, quantity, page_count, paper_size, color_mode,
-         finish, notes, service_location_address, service_location_classification,
-         location_charge, location_psgc_code, total_amount, payment_method, status, progress_stage)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid Balance', 1)`,
+         finish, signage_details_json, notes, service_location_address, service_location_classification,
+         location_charge, location_psgc_code, agreement_terms_snapshot,
+         agreement_terms_version_snapshot, total_amount, payment_method, status, progress_stage)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid Balance', 1)`,
       [
         orderNumber,
         input.walkIn ? null : user.id,
@@ -430,11 +504,14 @@ export async function POST(request: NextRequest) {
         optionLabel ?? input.paperSize ?? null,
         input.colorMode ?? null,
         input.finish ?? null,
+        signageDetailsJson,
         input.notes,
         serviceLocationAddress,
         locationClassification,
         locationCharge,
         locationPsgcCode,
+        week16Settings.agreementTerms,
+        week16Settings.agreementTermsVersion,
         finalTotal,
         input.paymentMethod,
       ],

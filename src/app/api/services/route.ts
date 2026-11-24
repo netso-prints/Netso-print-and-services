@@ -13,6 +13,13 @@ import {
   replaceServiceOptions,
 } from '@/lib/server/service-options';
 import { startingFrom, type ServiceOption } from '@/lib/pricing';
+import {
+  isSignageType,
+  sanitizeSignageConfig,
+  validateSignageOptions,
+  type SignageType,
+} from '@/lib/signage';
+import { loadWeek16Settings } from '@/lib/server/week16-settings';
 
 export const runtime = 'nodejs';
 
@@ -64,9 +71,31 @@ function toServiceOptions(options: z.infer<typeof optionSchema>[]): ServiceOptio
   }));
 }
 
+function resolveSignage(
+  category: string,
+  type: string | undefined,
+  config: Record<string, unknown> | undefined,
+  options: Array<{ label: string; pricingMode: string; unit: string }>,
+  allowLegacy: boolean,
+  rules: Awaited<ReturnType<typeof loadWeek16Settings>>['signageRules'],
+): { type: SignageType | null; configJson: string | null } {
+  if (category !== 'Signage') return { type: null, configJson: null };
+  if (!type) {
+    if (allowLegacy) return { type: null, configJson: null };
+    throw new ApiError(400, 'Choose a signage type: Panaprint/Panaflex, Acrylic or Cut-out Signage.');
+  }
+  if (!isSignageType(type)) throw new ApiError(400, 'Signage type is invalid.');
+  const checked = sanitizeSignageConfig(type, config, rules);
+  if (checked.error) throw new ApiError(400, checked.error);
+  const optionError = validateSignageOptions(type, options, rules);
+  if (optionError) throw new ApiError(400, optionError);
+  return { type, configJson: JSON.stringify(checked.config) };
+}
+
 export async function GET() {
   try {
     await ensureServiceCatalog();
+    const { signageRules } = await loadWeek16Settings(mysqlPool);
     const rows = await queryRows<
       { ID: number; service_code: string; service_name: string; category_name: string; icon_name: string | null; base_price: string | number; price_unit: string; description: string; popular_for: string | null; turnaround: string; is_active: number; signage_type: string | null; signage_config_json: string | null } & RowDataPacket
     >(
@@ -80,6 +109,7 @@ export async function GET() {
     const optionsByService = await loadOptionsByService();
     return NextResponse.json({
       ok: true,
+      signageRules,
       services: rows.map((row) => {
         const options = optionsByService.get(Number(row.ID)) ?? [];
         const start = options.length ? startingFrom(options) : null;
@@ -96,6 +126,9 @@ export async function GET() {
           available: Boolean(row.is_active),
           options,
           signageType: row.signage_type,
+          signageRule: isSignageType(row.signage_type)
+            ? signageRules[row.signage_type]
+            : undefined,
           signageConfig: row.signage_config_json
             ? (() => {
                 try { return JSON.parse(row.signage_config_json); } catch { return {}; }
@@ -118,12 +151,23 @@ export async function POST(request: NextRequest) {
     const parsed = z.object(serviceFields).safeParse(body);
     if (!parsed.success) throw new ApiError(400, 'Service details are invalid.');
     const data = parsed.data;
+    const { signageRules } = await loadWeek16Settings(connection);
     const code = data.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 50);
     if (!code) throw new ApiError(400, 'Service name must contain letters or numbers.');
+    const newSignage = resolveSignage(
+      data.category,
+      data.signageType,
+      data.signageConfig,
+      data.options,
+      false,
+      signageRules,
+    );
+    data.signageType = newSignage.type ?? undefined;
+    data.signageConfig = newSignage.configJson ? JSON.parse(newSignage.configJson) : undefined;
     const categories = await queryRows<{ ID: number } & RowDataPacket>(
       connection,
       'SELECT ID FROM tbl_service_category WHERE category_name = ?',
@@ -190,12 +234,23 @@ export async function PUT(request: NextRequest) {
       .safeParse(body);
     if (!parsed.success) throw new ApiError(400, 'Service details are invalid.');
     const data = parsed.data;
-    const current = await queryRows<{ ID: number } & RowDataPacket>(
+    const { signageRules } = await loadWeek16Settings(connection);
+    const current = await queryRows<{ ID: number; signage_type: string | null } & RowDataPacket>(
       connection,
-      'SELECT ID FROM tbl_services WHERE service_code = ?',
+      'SELECT ID, signage_type FROM tbl_services WHERE service_code = ?',
       [data.id],
     );
     if (!current.length) throw new ApiError(404, 'Service not found.');
+    const editedSignage = resolveSignage(
+      data.category,
+      data.signageType,
+      data.signageConfig,
+      data.options,
+      current[0].signage_type === null,
+      signageRules,
+    );
+    data.signageType = editedSignage.type ?? undefined;
+    data.signageConfig = editedSignage.configJson ? JSON.parse(editedSignage.configJson) : undefined;
     const categories = await queryRows<{ ID: number } & RowDataPacket>(
       connection,
       'SELECT ID FROM tbl_service_category WHERE category_name = ?',

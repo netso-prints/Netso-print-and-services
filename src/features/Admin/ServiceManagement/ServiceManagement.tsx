@@ -12,6 +12,14 @@ import {
   type ServiceOption,
 } from '@/lib/pricing';
 import { ICON_NAMES, iconFor } from '@/lib/service-icons';
+import {
+  SIGNAGE_TYPES,
+  parseSignageRules,
+  sanitizeSignageConfig,
+  validateSignageOptions,
+  type SignageType,
+  type SignageRule,
+} from '@/lib/signage';
 
 interface ServiceManagementProps {
   highContrastMode: boolean;
@@ -57,11 +65,28 @@ interface ServiceForm {
   options: OptionForm[];
   signageType?: 'panaprint-panaflex' | 'acrylic' | 'cut-out';
   signageConfig: Record<string, unknown>;
+  legacySignage?: boolean;
 }
 
 const CATEGORIES = ['Document', 'Photo & ID', 'Large Format', 'Signage', 'Merch & Gifts', 'Marketing'];
 const UNIT_SUGGESTIONS = ['per pc', 'per set', 'per sheet', 'per sq.ft', 'per sq.in'];
 const INPUT = 'border border-zinc-300 rounded-lg px-3 py-2 text-sm bg-white text-zinc-950';
+
+function normalizeOptionsForType(
+  type: SignageType | undefined,
+  options: OptionForm[],
+  signageRules: Record<SignageType, SignageRule>,
+): OptionForm[] {
+  if (!type) return options;
+  const rule = signageRules[type];
+  return options.map((option) => {
+    const pricingMode = rule.pricingModes.includes(option.pricingMode) ? option.pricingMode : rule.pricingModes[0];
+    const allowed = rule.units.filter((unit) => (pricingMode === 'area' ? unit.includes('sq') : !unit.includes('sq')));
+    const pool = allowed.length ? allowed : rule.units;
+    const unit = pool.includes(option.unit) ? option.unit : pool[0];
+    return { ...option, pricingMode, unit };
+  });
+}
 
 export function ServiceManagement({
   highContrastMode,
@@ -70,6 +95,7 @@ export function ServiceManagement({
   const { confirm } = useFeedback();
   const [services, setServices] = useState<AdminService[]>([]);
   const [form, setForm] = useState<ServiceForm | null>(null);
+  const [signageRules, setSignageRules] = useState(SIGNAGE_TYPES);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const keyCounter = useRef(0);
@@ -107,6 +133,9 @@ export function ServiceManagement({
       const response = await fetch('/api/services');
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Unable to load services.');
+      const loadedRules = parseSignageRules(result.signageRules);
+      if (!loadedRules) throw new Error('Configured signage rules are invalid. Ask a lead admin to correct them.');
+      setSignageRules(loadedRules);
       setServices(result.services as AdminService[]);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load services.');
@@ -143,7 +172,8 @@ export function ServiceManagement({
       popularFor: service.popularFor,
       description: service.description,
       options: service.options.length ? service.options.map(optionToForm) : [blankOption()],
-      signageType: service.signageType,
+      signageType: service.signageType ?? undefined,
+      legacySignage: service.category === 'Signage' && !service.signageType,
       signageConfig: service.signageConfig ?? {},
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -208,6 +238,24 @@ export function ServiceManagement({
         tiers,
         available: option.available,
       });
+    }
+    if (form.category === 'Signage') {
+      if (!form.signageType && !form.legacySignage) {
+        setError('Choose a signage type before saving.');
+        return;
+      }
+      if (form.signageType) {
+        const checked = sanitizeSignageConfig(form.signageType, form.signageConfig, signageRules);
+        if (checked.error) {
+          setError(checked.error);
+          return;
+        }
+        const optionError = validateSignageOptions(form.signageType, options, signageRules);
+        if (optionError) {
+          setError(optionError);
+          return;
+        }
+      }
     }
     setSaving(true);
     try {
@@ -346,15 +394,22 @@ export function ServiceManagement({
             {form.category === 'Signage' && (
               <select
                 required
-                value={form.signageType ?? ''}
+                value={form.signageType ?? (form.legacySignage ? 'legacy' : '')}
                 onChange={(e) => setForm({
                   ...form,
-                  signageType: e.target.value as 'panaprint-panaflex' | 'acrylic' | 'cut-out',
+                  signageType: (e.target.value === 'legacy' ? undefined : e.target.value || undefined) as SignageType | undefined,
+                  options: normalizeOptionsForType(
+                    (e.target.value === 'legacy' ? undefined : e.target.value || undefined) as SignageType | undefined,
+                    form.options,
+                    signageRules,
+                  ),
                   signageConfig: {},
                 })}
                 className={INPUT}
               >
-                <option value="" disabled>Select signage type</option>
+                <option value={form.legacySignage ? 'legacy' : ''} disabled={!form.legacySignage}>
+                  {form.legacySignage ? 'Keep existing (unclassified) format' : 'Select signage type'}
+                </option>
                 <option value="panaprint-panaflex">Panaprint/Panaflex</option>
                 <option value="acrylic">Acrylic</option>
                 <option value="cut-out">Cut-out Signage</option>
@@ -396,6 +451,54 @@ export function ServiceManagement({
             />
           </div>
 
+          {form.category === 'Signage' && form.signageType && (
+            <div className="space-y-2 rounded-xl border border-[#D4A017] bg-amber-50 p-3">
+              <h3 className="font-extrabold text-sm">{signageRules[form.signageType].label} details</h3>
+              <p className="text-xs text-zinc-600">{signageRules[form.signageType].help}</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {signageRules[form.signageType].fields.map((field) =>
+                  field.options ? (
+                    <label key={field.key} className="text-xs font-bold text-zinc-800">
+                      {field.label}{field.required ? ' *' : ''}
+                      <select
+                        required={field.required}
+                        value={String(form.signageConfig[field.key] ?? '')}
+                        onChange={(e) =>
+                          setForm({ ...form, signageConfig: { ...form.signageConfig, [field.key]: e.target.value } })
+                        }
+                        className={`mt-1 w-full ${INPUT}`}
+                      >
+                        <option value="">{field.required ? 'Select' : 'Not specified'}</option>
+                        {field.options.map((choice) => (
+                          <option key={choice} value={choice}>{choice}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <label key={field.key} className="text-xs font-bold text-zinc-800">
+                      {field.label}{field.required ? ' *' : ''}
+                      <input
+                        required={field.required}
+                        maxLength={100}
+                        placeholder={field.placeholder}
+                        value={String(form.signageConfig[field.key] ?? '')}
+                        onChange={(e) =>
+                          setForm({ ...form, signageConfig: { ...form.signageConfig, [field.key]: e.target.value } })
+                        }
+                        className={`mt-1 w-full ${INPUT}`}
+                      />
+                    </label>
+                  ),
+                )}
+              </div>
+              <p className="text-xs text-zinc-600">
+                Allowed units: {signageRules[form.signageType].units.join(', ')}.
+              </p>
+            </div>
+          )}
+          {form.category === 'Signage' && !form.signageType && !form.legacySignage && (
+            <p className="text-xs font-semibold text-amber-800">Select a signage type to load its form.</p>
+          )}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-extrabold text-sm">Options, sizes and prices</h3>

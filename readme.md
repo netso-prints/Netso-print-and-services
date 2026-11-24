@@ -169,11 +169,15 @@ Pending, flagged, and failed payments are not counted as collections.
    out of source control. `JWT_SECRET` must contain at least 32 random bytes.
 2. Create the MySQL database and import `database.sql` into it. The SQL file creates
    missing tables and seeds the service catalog; it does not alter an existing
-   schema. Back up and apply reviewed migrations before changing an existing database.
-   For an existing installation, run the one-time
-   [`001_gcash_toggle_and_order_payment_method.sql`](./migrations/001_gcash_toggle_and_order_payment_method.sql)
-   migration before deploying this update. It adds the persistent GCash toggle
-   (initially disabled) and the order payment method field.
+   schema. Back up and apply every outstanding migration in numerical order before
+   changing an existing database. This update adds
+   [`003_week16_client_settings.sql`](./migrations/003_week16_client_settings.sql)
+   and [`004_week16_admin_config.sql`](./migrations/004_week16_admin_config.sql)
+   for the Week 16 settings and order snapshots. Apply them after earlier migrations
+   such as `001_gcash_toggle_and_order_payment_method.sql` and
+   `002_week16_system_changes.sql`. A fresh database imported from the current
+   `database.sql` already includes these schema changes and should not run migrations
+   003 or 004 on top of it.
 3. Create a least-privilege MySQL application user with access only to this database
    and the `SELECT`, `INSERT`, `UPDATE`, and `DELETE` privileges used by the app.
    Use TLS and a non-empty password outside local development.

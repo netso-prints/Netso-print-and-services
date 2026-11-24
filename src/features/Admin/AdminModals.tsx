@@ -202,7 +202,13 @@ export function AdminRequestDetailsModal({
           </span>
           <button
             type="button"
-            onClick={() => window.open(`/api/orders/${encodeURIComponent(order.id)}/agreement`, '_blank', 'noopener,noreferrer')}
+            onClick={() =>
+              void import('@/lib/agreement-download')
+                .then(({ downloadAgreement }) => downloadAgreement(order.id))
+                .then((result) => {
+                  if (!result.ok) window.alert(`${result.error} Click Agreement PDF again to retry.`);
+                })
+            }
             className="px-3 py-1.5 rounded-lg border border-[#D4A017] bg-white text-[#8A6500] text-xs font-extrabold flex items-center gap-1.5"
           >
             <Download className="w-3.5 h-3.5" />
@@ -275,11 +281,38 @@ export function AdminRequestDetailsModal({
               <strong className="font-mono font-bold block">{order.specs?.copies ?? 1}</strong>
             </div>
           </div>
+          {order.serviceDetails && Object.keys(order.serviceDetails).length > 0 && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs sm:text-sm">
+              <span className="font-extrabold">Signage specifications</span>
+              <dl className="mt-1 grid gap-x-3 gap-y-1 sm:grid-cols-2">
+                {Object.entries(order.serviceDetails).map(([label, value]) => (
+                  <div key={label} className="flex gap-1">
+                    <dt className="font-bold">{label}:</dt>
+                    <dd className="break-words">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          )}
           <div className="pt-2 border-t border-zinc-200/70 dark:border-zinc-800 text-xs sm:text-sm">
             <span className="text-zinc-500 font-bold text-xs block">
               Special Instructions &amp; Notes:
             </span>
             <p className="font-semibold italic mt-0.5 break-words">&ldquo;{order.notes}&rdquo;</p>
+            <span className="text-zinc-500 font-bold text-xs block mt-2">Service Location</span>
+            <p className="font-semibold break-words">{order.serviceLocation || 'Not recorded (order placed before location tracking)'}</p>
+            <span className="text-zinc-500 font-bold text-xs block mt-2">
+              Location Charge (
+              {order.locationClassification === 'outside_area'
+                ? 'outside the service area'
+                : order.locationClassification === 'in_area'
+                  ? 'inside the service area'
+                  : 'unclassified'}
+              )
+            </span>
+            <p className="font-mono font-bold">
+              ₱{Number(order.locationCharge ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            </p>
           </div>
         </div>
 

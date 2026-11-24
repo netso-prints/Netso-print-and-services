@@ -58,6 +58,11 @@ export interface RequestOrder {
   paymongoId?: string;
   paidAt?: string;
   paymentVerified?: boolean;
+  serviceLocation?: string;
+  serviceDetails?: Record<string, string>;
+  locationClassification?: string;
+  locationCharge?: number;
+  agreementEligible?: boolean;
   files: UploadedFile[];
 }
 

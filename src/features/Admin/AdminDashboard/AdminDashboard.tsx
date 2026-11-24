@@ -17,6 +17,7 @@ import {
 } from '../../../types';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { StatusCard } from '../../../components/StatusCard';
+import { Week16SettingsPanel } from './Week16SettingsPanel';
 
 interface AdminDashboardProps {
   requests: RequestOrder[];
@@ -133,6 +134,8 @@ export function AdminDashboard({
           </button>
         </section>
       )}
+
+      {isLeadAdmin && <Week16SettingsPanel />}
 
       {/* 6 Summary Stat Cards */}
       <div className="space-y-3">
