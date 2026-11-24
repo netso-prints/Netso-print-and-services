@@ -49,7 +49,7 @@ function toForm(settings: Week16Settings): Week16SettingsForm {
 
 export function Week16SettingsPanel() {
   const [form, setForm] = useState<Week16SettingsForm | null>(null);
-  const [signageRulesText, setSignageRulesText] = useState('');
+  const [signageRules, setSignageRules] = useState<Record<SignageType, SignageRule> | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -61,18 +61,18 @@ export function Week16SettingsPanel() {
       .then(async (response) => {
         const result = await response.json();
         if (!response.ok || !result.ok) {
-          throw new Error(result.error || 'Unable to load Week 16 settings.');
+          throw new Error(result.error || 'Unable to load system settings.');
         }
         const settings = result as Week16Settings;
         if (active) {
           setForm(toForm(settings));
-          setSignageRulesText(JSON.stringify(settings.signageRules, null, 2));
+          setSignageRules(settings.signageRules);
         }
       })
       .catch((loadError: unknown) => {
         console.error('Unable to load Week 16 settings:', loadError);
         if (active) {
-          setError(loadError instanceof Error ? loadError.message : 'Unable to load Week 16 settings.');
+          setError(loadError instanceof Error ? loadError.message : 'Unable to load system settings.');
         }
       })
       .finally(() => {
@@ -88,6 +88,25 @@ export function Week16SettingsPanel() {
     setError('');
     setSuccess('');
   };
+
+  const updateSignageRule = (
+    type: SignageType,
+    changes: Partial<SignageRule>,
+  ) => {
+    setSignageRules((current) => current
+      ? { ...current, [type]: { ...current[type], ...changes } }
+      : current);
+    setError('');
+    setSuccess('');
+  };
+
+  const fieldKeyFromLabel = (label: string) =>
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .replace(/^[0-9]/, '_$&')
+      .slice(0, 40);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -123,11 +142,8 @@ export function Week16SettingsPanel() {
       return;
     }
 
-    let signageRules: unknown;
-    try {
-      signageRules = JSON.parse(signageRulesText);
-    } catch {
-      setError('Signage rules must be valid JSON. Review the example and correct the syntax.');
+    if (!signageRules) {
+      setError('Signage settings are unavailable.');
       return;
     }
 
@@ -155,15 +171,15 @@ export function Week16SettingsPanel() {
       });
       const result = await response.json();
       if (!response.ok || !result.ok) {
-        throw new Error(result.error || 'Unable to save Week 16 settings.');
+        throw new Error(result.error || 'Unable to save system settings.');
       }
       const settings = result as Week16Settings;
       setForm(toForm(settings));
-      setSignageRulesText(JSON.stringify(settings.signageRules, null, 2));
-      setSuccess('Week 16 settings saved and activated.');
+      setSignageRules(settings.signageRules);
+      setSuccess('System settings saved and activated.');
     } catch (saveError) {
-      console.error('Unable to save Week 16 settings:', saveError);
-      setError(saveError instanceof Error ? saveError.message : 'Unable to save Week 16 settings.');
+      console.error('Unable to save system settings:', saveError);
+      setError(saveError instanceof Error ? saveError.message : 'Unable to save system settings.');
     } finally {
       setSaving(false);
     }
@@ -172,7 +188,7 @@ export function Week16SettingsPanel() {
   if (loading) {
     return (
       <section className="rounded-2xl border border-zinc-300 bg-white p-5 text-sm font-semibold text-zinc-600 shadow-sm">
-        Loading Week 16 settings…
+        Loading system settings…
       </section>
     );
   }
@@ -180,7 +196,7 @@ export function Week16SettingsPanel() {
   if (!form) {
     return (
       <section className="rounded-2xl border border-red-300 bg-white p-5 text-sm font-semibold text-red-700 shadow-sm">
-        {error || 'Week 16 settings are unavailable.'}
+        {error || 'System settings are unavailable.'}
       </section>
     );
   }
@@ -188,7 +204,7 @@ export function Week16SettingsPanel() {
   return (
     <form onSubmit={save} className="space-y-5 rounded-2xl border border-[#D4A017] bg-white p-5 text-zinc-950 shadow-sm">
       <div>
-        <h2 className="text-lg font-extrabold">Week 16 system settings</h2>
+        <h2 className="text-lg font-extrabold">System settings</h2>
         <p className={HELP}>
           Lead-admin changes take effect immediately for new requests and agreement downloads. Existing saved order
           totals are not recalculated.
@@ -375,25 +391,160 @@ export function Week16SettingsPanel() {
         </div>
       </section>
 
-      <section className="space-y-2 border-t border-zinc-200 pt-4">
-        <h3 className="font-extrabold">Signage fields, units, and pricing modes</h3>
-        <p className={HELP}>
-          Edit the JSON rules for Panaprint/Panaflex, Acrylic, and Cut-out Signage. Field keys must be unique within
-          each type. Required fields and option lists are validated when services are saved and orders are submitted.
-          Changes activate immediately.
-        </p>
-        <textarea
-          aria-label="Signage rules JSON"
-          className={`${INPUT} font-mono text-xs`}
-          rows={18}
-          value={signageRulesText}
-          onChange={(event) => {
-            setSignageRulesText(event.target.value);
-            setError('');
-            setSuccess('');
-          }}
-          spellCheck={false}
-        />
+      <section className="space-y-4 border-t border-zinc-200 pt-4">
+        <div>
+          <h3 className="font-extrabold">Signage setup</h3>
+          <p className={HELP}>
+            Configure the questions, choices, units, and pricing method shown for each signage service.
+            Changes activate immediately for new and edited orders.
+          </p>
+        </div>
+        {signageRules && (Object.keys(signageRules) as SignageType[]).map((type) => {
+          const rule = signageRules[type];
+          return (
+            <div key={type} className="space-y-3 rounded-xl border border-zinc-300 p-4">
+              <h4 className="font-extrabold">{rule.label}</h4>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="text-sm font-bold">
+                  Signage name
+                  <input
+                    className={INPUT}
+                    value={rule.label}
+                    maxLength={100}
+                    onChange={(event) => updateSignageRule(type, { label: event.target.value })}
+                  />
+                </label>
+                <label className="text-sm font-bold">
+                  Short description
+                  <input
+                    className={INPUT}
+                    value={rule.help}
+                    maxLength={300}
+                    onChange={(event) => updateSignageRule(type, { help: event.target.value })}
+                  />
+                </label>
+              </div>
+              <fieldset>
+                <legend className="text-sm font-bold">Allowed pricing methods</legend>
+                <div className="mt-2 flex flex-wrap gap-4">
+                  {(['tier', 'area'] as const).map((mode) => (
+                    <label key={mode} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={rule.pricingModes.includes(mode)}
+                        onChange={(event) => {
+                          const next = event.target.checked
+                            ? [...rule.pricingModes, mode]
+                            : rule.pricingModes.filter((item) => item !== mode);
+                          if (next.length) updateSignageRule(type, { pricingModes: next });
+                        }}
+                        className={CHECKBOX}
+                      />
+                      {mode === 'area' ? 'By area (width x height)' : 'Fixed or quantity price'}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+              <label className="block text-sm font-bold">
+                Allowed units
+                <input
+                  className={INPUT}
+                  value={rule.units.join(', ')}
+                  placeholder="per pc, per set, per sq.ft"
+                  onChange={(event) => updateSignageRule(type, {
+                    units: event.target.value.split(',').map((unit) => unit.trim()).filter(Boolean),
+                  })}
+                />
+                <span className={`block font-normal ${HELP}`}>Separate units with commas.</span>
+              </label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-sm font-bold">Customer information fields</h5>
+                  <button
+                    type="button"
+                    onClick={() => updateSignageRule(type, {
+                      fields: [...rule.fields, { key: '', label: '', required: false, placeholder: '' }],
+                    })}
+                    className="rounded-lg border border-zinc-300 bg-zinc-100 px-3 py-1.5 text-xs font-extrabold"
+                  >
+                    Add field
+                  </button>
+                </div>
+                {rule.fields.map((field, fieldIndex) => (
+                  <div key={`${type}-${fieldIndex}`} className="grid gap-2 rounded-lg bg-zinc-50 p-3 sm:grid-cols-6">
+                    <label className="text-xs font-bold sm:col-span-2">
+                      Field name
+                      <input
+                        className={`${INPUT} mt-1`}
+                        value={field.label}
+                        onChange={(event) => {
+                          const fields = rule.fields.map((item, index) =>
+                            index === fieldIndex
+                              ? { ...item, label: event.target.value, key: fieldKeyFromLabel(event.target.value) }
+                              : item);
+                          updateSignageRule(type, { fields });
+                        }}
+                      />
+                    </label>
+                    <label className="flex items-center gap-2 text-xs font-bold sm:col-span-1">
+                      <input
+                        type="checkbox"
+                        checked={field.required}
+                        onChange={(event) => {
+                          const fields = rule.fields.map((item, index) =>
+                            index === fieldIndex ? { ...item, required: event.target.checked } : item);
+                          updateSignageRule(type, { fields });
+                        }}
+                        className={CHECKBOX}
+                      />
+                      Required
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => updateSignageRule(type, {
+                        fields: rule.fields.filter((_, index) => index !== fieldIndex),
+                      })}
+                      className="h-9 self-end rounded-lg border border-red-300 bg-red-50 px-2 text-xs font-extrabold text-red-700"
+                    >
+                      Remove
+                    </button>
+                    <label className="text-xs font-bold sm:col-span-3">
+                      Guide text
+                      <input
+                        className={`${INPUT} mt-1`}
+                        value={field.placeholder ?? ''}
+                        placeholder="Optional text shown inside the field"
+                        onChange={(event) => {
+                          const fields = rule.fields.map((item, index) =>
+                            index === fieldIndex
+                              ? { ...item, placeholder: event.target.value || undefined }
+                              : item);
+                          updateSignageRule(type, { fields });
+                        }}
+                      />
+                    </label>
+                    <label className="text-xs font-bold sm:col-span-3">
+                      Choices
+                      <input
+                        className={`${INPUT} mt-1`}
+                        value={(field.options ?? []).join(', ')}
+                        placeholder="Separate choices with commas"
+                        onChange={(event) => {
+                          const options = event.target.value.split(',').map((option) => option.trim()).filter(Boolean);
+                          const fields = rule.fields.map((item, index) =>
+                            index === fieldIndex
+                              ? { ...item, options: options.length ? options : undefined }
+                              : item);
+                          updateSignageRule(type, { fields });
+                        }}
+                      />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
       </section>
 
       {error && <p role="alert" className="text-sm font-bold text-red-700">{error}</p>}
@@ -403,7 +554,7 @@ export function Week16SettingsPanel() {
         disabled={saving}
         className="rounded-xl border border-black bg-[#D4A017] px-5 py-3 font-extrabold text-black hover:bg-[#E6B222] disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {saving ? 'Saving settings…' : 'Save and activate Week 16 settings'}
+        {saving ? 'Saving settings…' : 'Save and activate system settings'}
       </button>
     </form>
   );

@@ -347,10 +347,11 @@ export async function POST(request: NextRequest) {
     }
 
     const services = await queryRows<
-      { ID: number; service_name: string; category_name: string; base_price: string | number; is_active: number; signage_type: string | null } & import('mysql2/promise').RowDataPacket
+      { ID: number; service_name: string; category_name: string; base_price: string | number; is_active: number; outside_area_charge_applies: number; signage_type: string | null } & import('mysql2/promise').RowDataPacket
     >(
       connection,
-      `SELECT s.ID, s.service_name, c.category_name, s.base_price, s.is_active, s.signage_type
+      `SELECT s.ID, s.service_name, c.category_name, s.base_price, s.is_active,
+              s.outside_area_charge_applies, s.signage_type
        FROM tbl_services s JOIN tbl_service_category c ON c.ID = s.category_id
        WHERE (s.service_code = ? OR s.service_name = ?) LIMIT 1`,
       [input.service, input.service],
@@ -464,7 +465,11 @@ export async function POST(request: NextRequest) {
     }
     const total = input.walkIn ? input.amount ?? 0 : computedTotal;
     let locationCharge = 0;
-    if (!input.walkIn && locationClassification === 'outside_area') {
+    if (
+      !input.walkIn &&
+      locationClassification === 'outside_area' &&
+      Boolean(service.outside_area_charge_applies)
+    ) {
       const settingRows = await queryRows<{ setting_value: string } & import('mysql2/promise').RowDataPacket>(
         connection,
         'SELECT setting_value FROM tbl_app_setting WHERE setting_key = ? LIMIT 1',
